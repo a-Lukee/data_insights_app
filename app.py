@@ -360,7 +360,7 @@ if uploaded_file is not None:
 
         Developed using Python, Pandas, and Plotly.
                     
-        Project Made by: me
+        Project Made by: AL Damasco
         """)
 
         if debug_logs:
