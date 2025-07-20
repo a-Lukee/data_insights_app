@@ -1,27 +1,33 @@
+import io
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+import pyarrow as pa
 from utils.column_detection import detect_column_types
 from utils.data_cleaning import clean_data
 from utils.charts import generate_overview_charts
-from pandas.api.types import is_datetime64_any_dtype as is_datetime
 from utils.chart_suggester import suggest_chart_type
-from pandas.api.types import is_numeric_dtype
-
-import plotly.graph_objects as go
-
+from pandas.api.types import (
+    is_datetime64_any_dtype as is_datetime,
+    is_numeric_dtype,
+    is_integer_dtype,
+    is_float_dtype,
+    is_bool_dtype,
+    is_datetime64_any_dtype,
+    is_string_dtype,
+    is_object_dtype
+)
 
 st.set_page_config(page_title="HR Data Insights", layout="wide")
 
-# Top Title Bar
 st.markdown("""
     <div style="background-color:#4F81BD;padding:1rem 2rem;border-radius:5px;margin-bottom:20px;">
-        <h2 style="color:white;margin:0;">\U0001F4CA HR Data Insights Dashboard</h2>
+        <h2 style="color:white;margin:0;">\U0001F4CA Data Insights Dashboard</h2>
     </div>
 """, unsafe_allow_html=True)
 
-# Sidebar Navigation
 st.sidebar.markdown("## \U0001F4C1 Navigation")
 nav_option = {
     "Main Dashboard": "📊 Main Dashboard",
@@ -43,12 +49,62 @@ if selected_page:
 
 page = st.session_state.current_page
 
+
 st.sidebar.markdown("---")
 
-# File Upload
 uploaded_file = st.sidebar.file_uploader("\U0001F4C4 Upload Excel or CSV File", type=["xlsx", "csv"])
+if uploaded_file is None and page != "About":
+    st.warning("⚠️ Please upload a file to begin.")
+    st.stop()
+
+if "debug_logs" not in st.session_state:
+    st.session_state.debug_logs = []
+
+debug_logs = st.session_state.debug_logs
+
+def sanitize_df_for_streamlit(df: pd.DataFrame) -> pd.DataFrame:
+    import pyarrow as pa
+    import numpy as np
+    from pandas.api.types import (
+        is_float_dtype, is_bool_dtype,
+        is_datetime64_any_dtype, is_string_dtype,
+        is_object_dtype
+    )
+
+    df = df.copy()
+    df.columns = [str(col).strip() for col in df.columns]
+
+    if "Type" in df.columns:
+        df.drop(columns=["Type"], inplace=True)
+
+    to_drop = []
+    for col in df.columns:
+        col_data = df[col]
+        try:
+            if pd.api.types.is_integer_dtype(col_data) or isinstance(col_data.dtype, pd.Int64Dtype):
+                df[col] = pd.to_numeric(col_data, errors='coerce').fillna(0).astype(np.int64)
+            elif is_float_dtype(col_data):
+                df[col] = pd.to_numeric(col_data, errors='coerce').fillna(0.0).astype(np.float64)
+            elif is_bool_dtype(col_data):
+                df[col] = col_data.fillna(False).astype(bool)
+            elif is_datetime64_any_dtype(col_data):
+                df[col] = pd.to_datetime(col_data, errors='coerce')
+            elif is_string_dtype(col_data) or is_object_dtype(col_data):
+                df[col] = col_data.astype(str).fillna("")
+
+            _ = pa.array(df[col])
+
+        except Exception:
+            to_drop.append(col)
+
+    if to_drop:
+        debug_logs.append(f"⚠️ Dropping problematic columns: {to_drop}")
+        df.drop(columns=to_drop, inplace=True)
+
+    return df
 
 if uploaded_file is not None:
+    st.sidebar.info(f"📄 **Uploaded:** `{uploaded_file.name}`\n\n📦 **Size:** {uploaded_file.size / 1024:.2f} KB")
     file_type = uploaded_file.name.split(".")[-1]
 
     if file_type == "csv":
@@ -62,28 +118,59 @@ if uploaded_file is not None:
         st.stop()
 
     df_clean = clean_data(df)
+    df_clean = sanitize_df_for_streamlit(df_clean)
+    df = df_clean.copy()
+
+    if "Type" in df_clean.columns:
+        print("⚠️ 'Type' column still exists after sanitization!")
+
+    if "Type" in df_clean.columns:
+        print(df_clean["Type"].head())
+        print("dtype:", df_clean["Type"].dtype)
+
+    print(df_clean.dtypes)
+    print("Columns:", df_clean.columns.tolist())
+
+    #df_clean.columns = [str(c) for c in df_clean.columns]
     column_types = detect_column_types(df_clean)
 
+    debug_logs.append("✅ After sanitization: " + str(df_clean.columns.tolist()))
+    debug_logs.append("📦 Columns before Arrow serialization: " + str(df.columns.tolist()))
+    debug_logs.append("📐 Data types: " + str(df.dtypes.to_dict()))
+    debug_logs.append("📤 Final df columns: " + str(df.columns.tolist()))
+    debug_logs.append("📤 Final df dtypes: " + str(df.dtypes.to_dict()))
+
     if page == "Main Dashboard":
-        st.success(f"✅ File loaded successfully! ({df.shape[0]} rows × {df.shape[1]} columns)")
+        st.success(f"✅ File loaded successfully! ({df_clean.shape[0]} rows × {df_clean.shape[1]} columns)")
+        
+
+        #if "Type" in df.columns:
+            #st.error("❌ 'Type' column STILL exists! You’re using the wrong df!")
+            #st.stop()
+
+
         st.subheader("\U0001F50D Data Preview")
-        st.dataframe(df.head(10), use_container_width=True)
+        st.dataframe(df_clean.head(10), use_container_width=True)
+        #st.write("Debug columns:", df_clean.columns.tolist())
 
         st.subheader("\U0001F4CC Dataset Summary")
-        st.markdown(f"- **Rows:** {df.shape[0]}")
-        st.markdown(f"- **Columns:** {df.shape[1]}")
+        st.markdown(f"- **Rows:** {df_clean.shape[0]}")
+        st.markdown(f"- **Columns:** {df_clean.shape[1]}")
         summary = pd.DataFrame({
-            "Column": df.columns,
-            "Type": [df[col].dtype for col in df.columns],
-            "Missing (%)": [round(df[col].isna().mean() * 100, 2) for col in df.columns]
+            "Column": df_clean.columns,
+            "Type": [df_clean[col].dtype for col in df_clean.columns],
+            "Missing (%)": [round(df_clean[col].isna().mean() * 100, 2) for col in df_clean.columns]
         })
         st.dataframe(summary, use_container_width=True)
+
 
         st.subheader("\U0001F4C2 Column Type Summary")
         for dtype, cols in column_types.items():
             st.markdown(f"**{dtype.title()} Columns:** {', '.join(cols) if cols else '❌ None detected'}")
 
         st.subheader("\U0001F4C8 Initial Visual Insights")
+        #st.write("Detected column types:", column_types)
+
         generate_overview_charts(df_clean, column_types)
 
     elif page == "Customize Your Chart":
@@ -134,7 +221,7 @@ if uploaded_file is not None:
         y_axis = col2.multiselect("Y-Axis", ["None"] + list(df_clean.columns))
         color_by = col3.selectbox("Color By", ["None"] + column_types["categorical"])
 
-        # Suggest chart type
+        # Suggest
         chart_type_suggestion = suggest_chart_type(df_clean, x_axis, y_axis if y_axis else None)
         st.markdown(f"\U0001F4A1 **Suggested Chart:** `{chart_type_suggestion}`")
 
@@ -216,22 +303,18 @@ if uploaded_file is not None:
     elif page == "Waterfall Analysis":
         st.subheader("📉 Waterfall Analysis")
 
-        # Step 1: Choose grouping column (like "Period")
         group_col = st.selectbox("🧩 Select Grouping Column (Optional)", ["None"] + list(df_clean.columns))
 
-        # Step 2: Select row if group is used
         if group_col != "None":
             selected_value = st.selectbox(f"🔍 Select a value from `{group_col}`", df_clean[group_col].dropna().unique())
             filtered_df = df_clean[df_clean[group_col] == selected_value]
         else:
             filtered_df = df_clean
 
-        # Step 3: Let user select numeric columns as steps
         numeric_cols = [col for col in filtered_df.columns if is_numeric_dtype(filtered_df[col])]
         selected_cols = st.multiselect("📊 Select Numeric Columns for Waterfall Steps (in order)", numeric_cols)
 
         if selected_cols:
-            # Step 4: Define measure types
             col1, col2 = st.columns([2, 1])
             col_order = col1.text_area("✏️ Step Labels (One per line)", "\n".join(selected_cols)).splitlines()
             measures = col2.multiselect("📏 Step Type (Match Order)", ["relative", "total"], default=["relative"] * len(selected_cols))
@@ -263,16 +346,43 @@ if uploaded_file is not None:
     elif page == "About":
         st.title("About This App")
         st.markdown("""
-        **HR Data Insights Dashboard** is a Streamlit-based web application that enables users to upload, explore, and visualize HR datasets with ease.
+        **Data Insights Dashboard** is a Streamlit-based web application that enables users to upload, explore, and visualize HR datasets with ease.
 
         **Features:**
-        - Automated data profiling
-        - Smart chart recommendations
-        - Customizable and build-your-own charts
-        - Export cleaned data
+        - 📁 Upload Excel (.xlsx) or CSV files
+        - 🧹 Data cleaning (trims spaces, fixes dates, fills missing values)
+        - 📈 Auto-generated visual insights (Main Dashboard)
+        - ⚙️ Chart Customizer: histograms, bar charts, line charts, and more
+        - 🛠️ Build Your Own Chart with smart suggestions
+        - 📉 Waterfall analysis (with totals and labels)
+        - ✅ No manual setup or code required
+        - ~~⬇️ Export cleaned data as .csv or .xlsx~~
 
-        Developed with ❤️ using Python, Pandas, and Plotly.
+        Developed using Python, Pandas, and Plotly.
+                    
+        Project Made by: me
         """)
 
-    # Export
-    st.sidebar.download_button("⬇️ Download Cleaned Data", data=df_clean.to_csv(index=False).encode('utf-8'), file_name="cleaned_data.csv", mime="text/csv")
+        if debug_logs:
+            st.markdown("---")
+            st.subheader("🪛 Debug Info")
+            for log in debug_logs:
+                st.text(log)
+
+    #Export (soon)
+    #st.sidebar.download_button(
+        #"⬇️ Download Cleaned Data (CSV)",
+        #data=df_clean.to_csv(index=False).encode('utf-8'),
+        #file_name="cleaned_data.csv",
+        #mime="text/csv"
+    #)
+
+    #xlsx_buffer = io.BytesIO()
+    #with pd.ExcelWriter(xlsx_buffer, engine='xlsxwriter') as writer:
+        #df_clean.to_excel(writer, index=False, sheet_name="CleanedData")
+        #st.sidebar.download_button(
+            #"⬇️ Download Cleaned Data (XLSX)",
+            #data=xlsx_buffer.getvalue(),
+            #file_name="cleaned_data.xlsx",
+            #mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        #)
