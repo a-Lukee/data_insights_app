@@ -16,6 +16,8 @@ A flexible and user-friendly web app that transforms raw datasets into meaningfu
 
 ## Setup Instructions (For Editing Code)
 
+Python Version: 3.13.xx only!
+
 ### 1. Install Dependencies
 ```bash
 pip install -r requirements.txt
